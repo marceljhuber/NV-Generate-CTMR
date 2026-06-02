@@ -17,6 +17,7 @@ from monai.utils import set_determinism
 from torch.amp import GradScaler, autocast
 from torch.nn import L1Loss, MSELoss
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid, save_image
 
 from .oct_data import define_oct_image_transform, load_oct_manifest
 from .utils import KL_loss, define_instance
@@ -35,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-train-batches", type=int, default=None, help="Optional smoke-test limit for train batches per epoch.")
     parser.add_argument("--max-val-batches", type=int, default=None, help="Optional smoke-test limit for validation batches.")
+    parser.add_argument("--num-recon-images", type=int, default=8, help="Number of validation reconstructions to save per validation epoch.")
     parser.add_argument("--no-amp", dest="amp", action="store_false", help="Disable AMP for maximum numerical stability/debugging.")
     parser.add_argument("--wandb", action="store_true", help="Enable optional Weights & Biases logging.")
     parser.add_argument("--wandb-project", default="oct-maisi")
@@ -66,6 +68,19 @@ def loss_weighted_sum(losses: dict[str, torch.Tensor], kl_weight: float, ssim_we
     return losses["recon_loss"] + kl_weight * losses["kl_loss"] + ssim_weight * losses["ssim_loss"]
 
 
+def make_reconstruction_grid(images: torch.Tensor, reconstruction: torch.Tensor, num_images: int) -> torch.Tensor:
+    images = images[:num_images].detach().float().cpu().clamp(0, 1)
+    reconstruction = reconstruction[:num_images].detach().float().cpu().clamp(0, 1)
+    error = torch.abs(images - reconstruction).clamp(0, 1)
+    return make_grid(torch.cat([images, reconstruction, error], dim=0), nrow=max(len(images), 1), padding=2)
+
+
+def write_metrics_json(path: Path, metrics: dict) -> None:
+    with path.open("w") as handle:
+        json.dump(metrics, handle, indent=2)
+        handle.write("\n")
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
@@ -84,6 +99,8 @@ def main() -> None:
     config_ns.model_dir = str(args.model_dir)
     args.model_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    recon_dir = args.output_dir / "reconstructions"
+    recon_dir.mkdir(parents=True, exist_ok=True)
 
     train_records = load_oct_manifest(args.train_manifest, args.dataset_root)
     val_records = load_oct_manifest(args.val_manifest, args.dataset_root)
@@ -166,7 +183,9 @@ def main() -> None:
 
         if (epoch + 1) % vae_train["val_interval"] == 0:
             autoencoder.eval()
-            val_loss = 0.0
+            val_totals = {"loss": 0.0, "recon_loss": 0.0, "kl_loss": 0.0, "ssim_loss": 0.0}
+            recon_grid = None
+            num_val_batches = max(min(len(val_loader), args.max_val_batches or len(val_loader)), 1)
             with torch.no_grad():
                 for batch_idx, batch in enumerate(val_loader):
                     if args.max_val_batches is not None and batch_idx >= args.max_val_batches:
@@ -179,15 +198,34 @@ def main() -> None:
                             "kl_loss": KL_loss(z_mu, z_sigma),
                             "ssim_loss": ssim_loss(reconstruction.float(), images.float()),
                         }
-                        val_loss += loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"]).item()
-            val_loss /= max(min(len(val_loader), args.max_val_batches or len(val_loader)), 1)
-            writer.add_scalar("val/loss", val_loss, epoch + 1)
+                        total_loss = loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"])
+                    val_totals["loss"] += total_loss.item()
+                    for key, value in losses.items():
+                        val_totals[key] += value.item()
+                    if recon_grid is None and args.num_recon_images > 0:
+                        recon_grid = make_reconstruction_grid(images, reconstruction, args.num_recon_images)
+
+            val_metrics = {key: value / num_val_batches for key, value in val_totals.items()}
+            val_metrics["ssim_score"] = 1.0 - val_metrics["ssim_loss"]
+            for key, value in val_metrics.items():
+                writer.add_scalar(f"val/{key}", value, epoch + 1)
+            if recon_grid is not None:
+                recon_path = recon_dir / f"epoch_{epoch + 1:04d}_recon_grid.png"
+                save_image(recon_grid, recon_path)
+                writer.add_image("val/reconstruction_grid", recon_grid, epoch + 1)
             if wandb_run:
-                wandb_run.log({"val/loss": val_loss, "epoch": epoch + 1})
-            logging.info("Epoch %d validation loss: %.6f", epoch + 1, val_loss)
-            if val_loss < best_val:
-                best_val = val_loss
+                wandb_log = {f"val/{key}": value for key, value in val_metrics.items()} | {"epoch": epoch + 1}
+                if recon_grid is not None:
+                    import wandb
+
+                    wandb_log["val/reconstruction_grid"] = wandb.Image(str(recon_path), caption="rows: input, reconstruction, abs error")
+                wandb_run.log(wandb_log)
+            logging.info("Epoch %d validation metrics: %s", epoch + 1, val_metrics)
+            write_metrics_json(args.output_dir / "latest_val_metrics.json", {"epoch": epoch + 1, **val_metrics})
+            if val_metrics["loss"] < best_val:
+                best_val = val_metrics["loss"]
                 torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_best.pt")
+                write_metrics_json(args.output_dir / "best_val_metrics.json", {"epoch": epoch + 1, **val_metrics})
 
         torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_latest.pt")
         torch.save(discriminator.state_dict(), args.model_dir / "discriminator_oct_128_latest.pt")

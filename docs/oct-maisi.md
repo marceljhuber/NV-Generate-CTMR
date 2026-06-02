@@ -51,7 +51,8 @@ Run a minimal training smoke test before a full run:
 ```bash
 python -m scripts.train_oct_vae \
   --max-train-batches 2 \
-  --max-val-batches 1
+  --max-val-batches 1 \
+  --num-recon-images 8
 ```
 
 For W&B logging, first authenticate once:
@@ -93,3 +94,22 @@ AMP is enabled by default for speed on the RTX 4070 Ti SUPER. For final quality-
 - Runtime verification still requires installing PyTorch and MONAI in the active environment.
 - First training target is VAE reconstruction quality, not diffusion generation.
 - The OCT VAE uses MONAI's generic 2D `AutoencoderKL`; NVIDIA's MAISI-specific autoencoder currently expects 5D volumetric tensors and is not suitable for direct 2D OCT training.
+
+## VAE Tracking
+
+The VAE trainer tracks:
+
+- Train reconstruction loss, KL loss, SSIM loss, generator adversarial loss, and discriminator loss per step.
+- Validation total loss, reconstruction loss, KL loss, SSIM loss, and SSIM score per validation epoch.
+- Best checkpoint by validation total loss.
+- Validation reconstruction grids under `outputs/oct_vae_128/reconstructions/`.
+
+Each reconstruction grid has three rows:
+
+```text
+input OCT images
+decoded reconstructions
+absolute reconstruction error
+```
+
+By default, 8 validation images are saved per validation epoch. Increase `--num-recon-images` only if visual inspection needs more examples; 8 is enough to see whether the VAE preserves retinal layers without bloating logs.
