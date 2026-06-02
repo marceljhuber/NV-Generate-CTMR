@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+models/
+outputs/
+runs/
+wandb/
