@@ -78,7 +78,7 @@ def define_oct_image_transform(
     spatial_size = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
 
     transforms = [
-        SelectItemsd(keys=["image", "class_label", "label", "patient_id", "relative_path"], allow_missing_keys=True),
+        SelectItemsd(keys=["image", "class_label", "label", "patient_id", "image_index", "source_split", "relative_path"], allow_missing_keys=True),
         LoadImaged(keys="image", image_only=True),
         EnsureChannelFirstd(keys="image", channel_dim="no_channel"),
         Lambdad(keys="image", func=lambda x: x[:1] if x.shape[0] > 1 else x),
