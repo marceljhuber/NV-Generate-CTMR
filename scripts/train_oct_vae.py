@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/oct_vae_128"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--max-train-batches", type=int, default=None, help="Optional smoke-test limit for train batches per epoch.")
+    parser.add_argument("--max-val-batches", type=int, default=None, help="Optional smoke-test limit for validation batches.")
     parser.add_argument("--no-amp", dest="amp", action="store_false", help="Disable AMP for maximum numerical stability/debugging.")
     parser.add_argument("--wandb", action="store_true", help="Enable optional Weights & Biases logging.")
     parser.add_argument("--wandb-project", default="oct-maisi")
@@ -119,7 +121,9 @@ def main() -> None:
         autoencoder.train()
         discriminator.train()
         epoch_losses = {"recon_loss": 0.0, "kl_loss": 0.0, "ssim_loss": 0.0}
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader):
+            if args.max_train_batches is not None and batch_idx >= args.max_train_batches:
+                break
             images = batch["image"].to(device).contiguous()
             optimizer_g.zero_grad(set_to_none=True)
             optimizer_d.zero_grad(set_to_none=True)
@@ -157,14 +161,16 @@ def main() -> None:
             if wandb_run:
                 wandb_run.log({f"train/{key}": value.item() for key, value in losses.items()} | {"train/discriminator_loss": loss_d.item()})
 
-        num_train_batches = max(len(train_loader), 1)
+        num_train_batches = max(min(len(train_loader), args.max_train_batches or len(train_loader)), 1)
         logging.info("Epoch %d train losses: %s", epoch + 1, {key: value / num_train_batches for key, value in epoch_losses.items()})
 
         if (epoch + 1) % vae_train["val_interval"] == 0:
             autoencoder.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for batch in val_loader:
+                for batch_idx, batch in enumerate(val_loader):
+                    if args.max_val_batches is not None and batch_idx >= args.max_val_batches:
+                        break
                     images = batch["image"].to(device).contiguous()
                     with autocast("cuda", enabled=args.amp):
                         reconstruction, z_mu, z_sigma = autoencoder(images)
@@ -174,7 +180,7 @@ def main() -> None:
                             "ssim_loss": ssim_loss(reconstruction.float(), images.float()),
                         }
                         val_loss += loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"]).item()
-            val_loss /= max(len(val_loader), 1)
+            val_loss /= max(min(len(val_loader), args.max_val_batches or len(val_loader)), 1)
             writer.add_scalar("val/loss", val_loss, epoch + 1)
             if wandb_run:
                 wandb_run.log({"val/loss": val_loss, "epoch": epoch + 1})

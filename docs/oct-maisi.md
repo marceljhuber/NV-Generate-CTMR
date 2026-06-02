@@ -46,6 +46,20 @@ python -m scripts.check_oct_setup --check-wandb
 
 If W&B is not needed for a smoke test, omit `--check-wandb`.
 
+Run a minimal training smoke test before a full run:
+
+```bash
+python -m scripts.train_oct_vae \
+  --max-train-batches 2 \
+  --max-val-batches 1
+```
+
+For W&B logging, first authenticate once:
+
+```bash
+wandb login
+```
+
 Train a 2D 128 px OCT VAE:
 
 ```bash
@@ -78,3 +92,4 @@ AMP is enabled by default for speed on the RTX 4070 Ti SUPER. For final quality-
 - W&B logging is wired through `--wandb`.
 - Runtime verification still requires installing PyTorch and MONAI in the active environment.
 - First training target is VAE reconstruction quality, not diffusion generation.
+- The OCT VAE uses MONAI's generic 2D `AutoencoderKL`; NVIDIA's MAISI-specific autoencoder currently expects 5D volumetric tensors and is not suitable for direct 2D OCT training.
