@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from pathlib import Path
 
@@ -38,16 +37,6 @@ def load_json(path: Path) -> dict:
         return json.load(handle)
 
 
-def write_manifest(path: Path, rows: list[dict]) -> None:
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["latent_path", "relative_path", "label", "class_label", "patient_id", "image_index", "source_split"],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def make_loader(records: list[dict], image_size: int, batch_size: int, num_workers: int) -> DataLoader:
     transform = define_oct_image_transform(image_size=image_size, is_train=False, output_dtype=torch.float32, random_aug=False)
     dataset = Dataset(data=records, transform=transform)
@@ -60,55 +49,39 @@ def encode_split(args: argparse.Namespace, split: str, records: list[dict], auto
     split_dir.mkdir(parents=True, exist_ok=True)
     loader = make_loader(records, args.image_size, args.batch_size, args.num_workers)
     out_dtype = torch.float16 if args.dtype == "float16" else torch.float32
-    manifest_rows: list[dict] = []
     count = 0
+    shard_rows: list[dict] = []
 
     for batch_idx, batch in enumerate(loader):
         if args.max_batches is not None and batch_idx >= args.max_batches:
             break
         images = batch["image"].to(device)
         z_mu, _ = autoencoder.encode(images)
-        z_mu = z_mu.detach().cpu().to(out_dtype)
-
-        for item_idx in range(z_mu.shape[0]):
-            relative_path = batch["relative_path"][item_idx]
-            label = batch["label"][item_idx]
-            patient_id = str(batch["patient_id"][item_idx])
-            image_index = int(batch["image_index"][item_idx])
-            source_split = batch["source_split"][item_idx]
-            safe_stem = Path(relative_path).with_suffix("").as_posix().replace("/", "__")
-            latent_path = split_dir / f"{safe_stem}.pt"
-            class_label = int(batch["class_label"][item_idx])
-            torch.save(
-                {
-                    "latent": z_mu[item_idx],
-                    "label": label,
-                    "class_label": class_label,
-                    "patient_id": patient_id,
-                    "image_index": image_index,
-                    "relative_path": relative_path,
-                    "source_split": source_split,
-                },
-                latent_path,
-            )
-            manifest_rows.append(
-                {
-                    "latent_path": str(latent_path.relative_to(args.output_dir)),
-                    "relative_path": relative_path,
-                    "label": label,
-                    "class_label": class_label,
-                    "patient_id": patient_id,
-                    "image_index": image_index,
-                    "source_split": source_split,
-                }
-            )
-            count += 1
+        z_mu = z_mu.detach().cpu().to(out_dtype).contiguous()
+        shard_path = split_dir / f"shard_{batch_idx:06d}.pt"
+        class_labels = torch.as_tensor(batch["class_label"], dtype=torch.long)
+        torch.save(
+            {
+                "latents": z_mu,
+                "class_labels": class_labels,
+                "labels": list(batch["label"]),
+                "patient_ids": [str(value) for value in batch["patient_id"]],
+                "image_indices": [int(value) for value in batch["image_index"]],
+                "relative_paths": list(batch["relative_path"]),
+                "source_splits": list(batch["source_split"]),
+            },
+            shard_path,
+        )
+        shard_rows.append({"path": str(shard_path.relative_to(args.output_dir)), "num_items": int(z_mu.shape[0])})
+        count += int(z_mu.shape[0])
 
         if (batch_idx + 1) % 100 == 0:
             print(f"{split}: encoded {count} images")
 
-    manifest_path = args.output_dir / f"{split}_latents_manifest.csv"
-    write_manifest(manifest_path, manifest_rows)
+    manifest_path = args.output_dir / f"{split}_shards.json"
+    with manifest_path.open("w") as handle:
+        json.dump({"split": split, "num_latents": count, "shards": shard_rows}, handle, indent=2)
+        handle.write("\n")
     return {"split": split, "num_latents": count, "manifest": str(manifest_path)}
 
 

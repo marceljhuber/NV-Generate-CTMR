@@ -21,18 +21,15 @@
         "use_flash_attention": false
     },
     "diffusion_unet_def": {
-        "_target_": "monai.apps.generation.maisi.networks.diffusion_model_unet_maisi.DiffusionModelUNetMaisi",
+        "_target_": "monai.networks.nets.DiffusionModelUNet",
         "spatial_dims": "@spatial_dims",
         "in_channels": "@latent_channels",
         "out_channels": "@latent_channels",
-        "num_channels": [64, 128, 256],
+        "channels": [64, 128, 256],
         "attention_levels": [false, true, true],
         "num_head_channels": [0, 32, 32],
         "num_res_blocks": 2,
         "use_flash_attention": true,
-        "include_top_region_index_input": false,
-        "include_bottom_region_index_input": false,
-        "include_spacing_input": false,
         "num_class_embeds": 5,
         "resblock_updown": true,
         "include_fc": true
@@ -43,6 +40,7 @@
         "use_discrete_timesteps": false,
         "use_timestep_transform": true,
         "sample_method": "uniform",
-        "scale": 1.0
+        "scale": 1.0,
+        "spatial_dim": 2
     }
 }

@@ -35,6 +35,15 @@ OCT_LABEL_TO_ID = {
 OCT_ID_TO_LABEL = {value: key for key, value in OCT_LABEL_TO_ID.items()}
 
 
+def ensure_single_oct_channel(image: torch.Tensor) -> torch.Tensor:
+    """Return one grayscale OCT channel for grayscale or RGB-loaded images."""
+    if image.ndim == 4 and image.shape[-1] in (3, 4):
+        image = image[..., 0]
+    if image.shape[0] > 1:
+        image = image[:1]
+    return image
+
+
 def load_oct_manifest(manifest_path: str | Path, dataset_root: str | Path) -> list[dict]:
     """Load a KermanyV3 OCT CSV manifest into MONAI dict records."""
     manifest_path = Path(manifest_path)
@@ -81,7 +90,7 @@ def define_oct_image_transform(
         SelectItemsd(keys=["image", "class_label", "label", "patient_id", "image_index", "source_split", "relative_path"], allow_missing_keys=True),
         LoadImaged(keys="image", image_only=True),
         EnsureChannelFirstd(keys="image", channel_dim="no_channel"),
-        Lambdad(keys="image", func=lambda x: x[:1] if x.shape[0] > 1 else x),
+        Lambdad(keys="image", func=ensure_single_oct_channel),
         Lambdad(keys="image", func=lambda x: torch.rot90(x, k=-1, dims=(-2, -1))),
         EnsureTyped(keys="image", dtype=torch.float32),
         ScaleIntensityd(keys="image", minv=0.0, maxv=1.0),

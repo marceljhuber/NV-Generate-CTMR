@@ -1,0 +1,14 @@
+{
+    "diffusion_train": {
+        "batch_size": 128,
+        "lr": 0.0001,
+        "n_epochs": 50,
+        "val_interval": 5,
+        "label_dropout": 0.15,
+        "num_inference_steps": 30,
+        "cfg_guidance_scale": 2.0,
+        "samples_per_class": 4,
+        "final_samples_per_class": 25,
+        "amp": true
+    }
+}
