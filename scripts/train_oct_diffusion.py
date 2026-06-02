@@ -60,6 +60,13 @@ def make_loader(latents: torch.Tensor, labels: torch.Tensor, batch_size: int, sh
     return DataLoader(TensorDataset(latents, labels), batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=shuffle)
 
 
+def limited_batches(loader: DataLoader, max_batches: int | None):
+    for batch_idx, batch in enumerate(loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+        yield batch_idx, batch
+
+
 def drop_labels(labels: torch.Tensor, dropout: float) -> torch.Tensor:
     if dropout <= 0:
         return labels
@@ -149,7 +156,8 @@ def main() -> None:
     for epoch in range(train_config["n_epochs"]):
         unet.train()
         train_loss = 0.0
-        for latents, labels in train_loader:
+        train_batches = 0
+        for batch_idx, (latents, labels) in limited_batches(train_loader, train_config.get("max_train_batches")):
             latents = latents.to(device) * scale_factor
             labels = drop_labels(labels.to(device), train_config["label_dropout"])
             optimizer.zero_grad(set_to_none=True)
@@ -166,19 +174,23 @@ def main() -> None:
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
+            train_batches += 1
             global_step += 1
             writer.add_scalar("train/loss", loss.item(), global_step)
             if wandb_run:
                 wandb_run.log({"train/loss": loss.item(), "global_step": global_step})
+            if (batch_idx + 1) % 25 == 0:
+                print(f"epoch {epoch + 1} train batch {batch_idx + 1}: loss={loss.item():.6f}", flush=True)
 
-        train_loss /= max(len(train_loader), 1)
+        train_loss /= max(train_batches, 1)
         writer.add_scalar("epoch/train_loss", train_loss, epoch + 1)
 
         if (epoch + 1) % train_config["val_interval"] == 0 or epoch + 1 == train_config["n_epochs"]:
             unet.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for latents, labels in val_loader:
+                val_batches = 0
+                for _, (latents, labels) in limited_batches(val_loader, train_config.get("max_val_batches")):
                     latents = latents.to(device) * scale_factor
                     labels = labels.to(device)
                     noise = torch.randn_like(latents)
@@ -186,7 +198,8 @@ def main() -> None:
                     noisy = scheduler.add_noise(original_samples=latents, noise=noise, timesteps=timesteps)
                     pred = unet(noisy, timesteps=timesteps, class_labels=labels)
                     val_loss += loss_fn(pred.float(), (latents - noise).float()).item()
-            val_loss /= max(len(val_loader), 1)
+                    val_batches += 1
+            val_loss /= max(val_batches, 1)
             writer.add_scalar("val/loss", val_loss, epoch + 1)
             sample_images_tensor = sample_images(
                 unet,

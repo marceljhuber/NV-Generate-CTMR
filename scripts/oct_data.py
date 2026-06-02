@@ -91,6 +91,8 @@ def define_oct_image_transform(
         LoadImaged(keys="image", image_only=True),
         EnsureChannelFirstd(keys="image", channel_dim="no_channel"),
         Lambdad(keys="image", func=ensure_single_oct_channel),
+        # MONAI's generic 2D image loading path exposes Kermany JPEGs transposed
+        # relative to the raw PIL view; rotate once to restore the original OCT layout.
         Lambdad(keys="image", func=lambda x: torch.rot90(x, k=-1, dims=(-2, -1))),
         EnsureTyped(keys="image", dtype=torch.float32),
         ScaleIntensityd(keys="image", minv=0.0, maxv=1.0),
