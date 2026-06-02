@@ -81,6 +81,11 @@ def write_metrics_json(path: Path, metrics: dict) -> None:
         handle.write("\n")
 
 
+def assert_finite(name: str, value: torch.Tensor) -> None:
+    if not torch.isfinite(value).all():
+        raise FloatingPointError(f"Non-finite {name}: {value.detach().float().cpu().item()}")
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
@@ -121,8 +126,9 @@ def main() -> None:
 
     recon_loss = MSELoss() if vae_train["recon_loss"] == "l2" else L1Loss(reduction="mean")
     ssim_loss = SSIMLoss(spatial_dims=2, data_range=1.0)
+    use_adversarial = vae_train["adv_weight"] > 0
     optimizer_g = torch.optim.Adam(autoencoder.parameters(), lr=vae_train["lr"], eps=1e-6 if args.amp else 1e-8)
-    optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=vae_train["lr"], eps=1e-6 if args.amp else 1e-8)
+    optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=vae_train["lr"], eps=1e-6 if args.amp else 1e-8) if use_adversarial else None
     scaler_g = GradScaler("cuda", enabled=args.amp)
     scaler_d = GradScaler("cuda", enabled=args.amp)
     writer = SummaryWriter(log_dir=str(args.output_dir / "tfevents"))
@@ -143,7 +149,8 @@ def main() -> None:
                 break
             images = batch["image"].to(device).contiguous()
             optimizer_g.zero_grad(set_to_none=True)
-            optimizer_d.zero_grad(set_to_none=True)
+            if optimizer_d is not None:
+                optimizer_d.zero_grad(set_to_none=True)
 
             with autocast("cuda", enabled=args.amp):
                 reconstruction, z_mu, z_sigma = autoencoder(images)
@@ -152,22 +159,29 @@ def main() -> None:
                     "kl_loss": KL_loss(z_mu, z_sigma),
                     "ssim_loss": ssim_loss(reconstruction.float(), images.float()),
                 }
-                logits_fake = discriminator(reconstruction.contiguous().float())[-1]
-                generator_adv = torch.mean((logits_fake - 1.0) ** 2)
+                if use_adversarial:
+                    logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+                    generator_adv = torch.mean((logits_fake - 1.0) ** 2)
+                else:
+                    generator_adv = torch.zeros((), device=device)
                 loss_g = loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"]) + vae_train["adv_weight"] * generator_adv
+                assert_finite("generator loss", loss_g)
 
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
 
-            with autocast("cuda", enabled=args.amp):
-                logits_fake = discriminator(reconstruction.detach().contiguous().float())[-1]
-                logits_real = discriminator(images.detach().contiguous().float())[-1]
-                loss_d = 0.5 * (torch.mean(logits_fake**2) + torch.mean((logits_real - 1.0) ** 2))
-
-            scaler_d.scale(loss_d).backward()
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
+            if use_adversarial and optimizer_d is not None:
+                with autocast("cuda", enabled=args.amp):
+                    logits_fake = discriminator(reconstruction.detach().contiguous().float())[-1]
+                    logits_real = discriminator(images.detach().contiguous().float())[-1]
+                    loss_d = 0.5 * (torch.mean(logits_fake**2) + torch.mean((logits_real - 1.0) ** 2))
+                    assert_finite("discriminator loss", loss_d)
+                scaler_d.scale(loss_d).backward()
+                scaler_d.step(optimizer_d)
+                scaler_d.update()
+            else:
+                loss_d = torch.zeros((), device=device)
 
             global_step += 1
             for key, value in losses.items():
@@ -199,6 +213,7 @@ def main() -> None:
                             "ssim_loss": ssim_loss(reconstruction.float(), images.float()),
                         }
                         total_loss = loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"])
+                        assert_finite("validation loss", total_loss)
                     val_totals["loss"] += total_loss.item()
                     for key, value in losses.items():
                         val_totals[key] += value.item()

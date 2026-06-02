@@ -70,6 +70,20 @@ python -m scripts.train_oct_vae \
   --val-manifest ../../data_splits/kermanyv3_oct/val_manifest.csv
 ```
 
+For the first stable overnight run, prefer reconstruction-first full precision training:
+
+```bash
+python -m scripts.train_oct_vae \
+  --train-config configs/config_maisi_vae_train_oct_128_stable.json \
+  --model-dir models/oct_vae_128_stable \
+  --output-dir outputs/oct_vae_128_stable \
+  --num-recon-images 8 \
+  --num-workers 4 \
+  --no-amp \
+  --wandb \
+  --wandb-project oct-maisi
+```
+
 Optional W&B logging:
 
 ```bash
@@ -85,6 +99,8 @@ python -m scripts.train_oct_vae --no-amp
 ## Precision Policy
 
 AMP is enabled by default for speed on the RTX 4070 Ti SUPER. For final quality-sensitive runs, compare at least one short AMP run against `--no-amp`. Keep the best validation/reconstruction behavior, not the fastest setting.
+
+The first W&B overnight run with AMP and adversarial loss became unstable and produced NaNs. Use the stable config above first: full precision, adversarial loss disabled, and NaN detection enabled.
 
 ## Current Readiness Checklist
 
