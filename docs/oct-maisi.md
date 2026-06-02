@@ -32,6 +32,20 @@ OCT disease labels are used as class-conditioning labels:
 
 ## First Training Step: VAE
 
+Install dependencies first. For CUDA-enabled PyTorch, follow the PyTorch command matching the local CUDA driver, then install the remaining dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Check OCT setup before training:
+
+```bash
+python -m scripts.check_oct_setup --check-wandb
+```
+
+If W&B is not needed for a smoke test, omit `--check-wandb`.
+
 Train a 2D 128 px OCT VAE:
 
 ```bash
@@ -56,3 +70,11 @@ python -m scripts.train_oct_vae --no-amp
 ## Precision Policy
 
 AMP is enabled by default for speed on the RTX 4070 Ti SUPER. For final quality-sensitive runs, compare at least one short AMP run against `--no-amp`. Keep the best validation/reconstruction behavior, not the fastest setting.
+
+## Current Readiness Checklist
+
+- Dataset manifests exist and are patient-disjoint.
+- OCT JPEG/PNG loading and transforms are implemented.
+- W&B logging is wired through `--wandb`.
+- Runtime verification still requires installing PyTorch and MONAI in the active environment.
+- First training target is VAE reconstruction quality, not diffusion generation.
