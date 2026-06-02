@@ -106,6 +106,7 @@ The first W&B overnight run with AMP and adversarial loss became unstable and pr
 
 - Dataset manifests exist and are patient-disjoint.
 - OCT JPEG/PNG loading and transforms are implemented.
+- OCT images are rotated 90 degrees clockwise during loading to match the expected visual orientation.
 - W&B logging is wired through `--wandb`.
 - Runtime verification still requires installing PyTorch and MONAI in the active environment.
 - First training target is VAE reconstruction quality, not diffusion generation.

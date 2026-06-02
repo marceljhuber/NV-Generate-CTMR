@@ -82,6 +82,7 @@ def define_oct_image_transform(
         LoadImaged(keys="image", image_only=True),
         EnsureChannelFirstd(keys="image", channel_dim="no_channel"),
         Lambdad(keys="image", func=lambda x: x[:1] if x.shape[0] > 1 else x),
+        Lambdad(keys="image", func=lambda x: torch.rot90(x, k=-1, dims=(-2, -1))),
         EnsureTyped(keys="image", dtype=torch.float32),
         ScaleIntensityd(keys="image", minv=0.0, maxv=1.0),
         Resized(keys="image", spatial_size=spatial_size, mode="bilinear"),
