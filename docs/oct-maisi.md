@@ -84,6 +84,30 @@ python -m scripts.train_oct_vae \
   --wandb-project oct-maisi
 ```
 
+For a quick orientation-corrected checkpoint usable by the next pipeline stage, run the 5-epoch config:
+
+```bash
+python -m scripts.train_oct_vae \
+  --train-config configs/config_maisi_vae_train_oct_128_5epochs.json \
+  --model-dir models/oct_vae_128_5epochs \
+  --output-dir outputs/oct_vae_128_5epochs \
+  --num-recon-images 8 \
+  --num-workers 4 \
+  --no-amp \
+  --wandb \
+  --wandb-project oct-maisi
+```
+
+Create latents from a trained VAE checkpoint:
+
+```bash
+python -m scripts.create_oct_latents \
+  --checkpoint models/oct_vae_128_5epochs/autoencoder_oct_128_best.pt \
+  --output-dir outputs/oct_latents_128_5epochs \
+  --batch-size 128 \
+  --num-workers 4
+```
+
 Optional W&B logging:
 
 ```bash
