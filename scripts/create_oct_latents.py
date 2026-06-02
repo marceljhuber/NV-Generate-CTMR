@@ -57,9 +57,14 @@ def encode_split(args: argparse.Namespace, split: str, records: list[dict], auto
             break
         images = batch["image"].to(device)
         z_mu, _ = autoencoder.encode(images)
+        if hasattr(z_mu, "as_tensor"):
+            z_mu = z_mu.as_tensor()
         z_mu = z_mu.detach().cpu().to(out_dtype).contiguous()
         shard_path = split_dir / f"shard_{batch_idx:06d}.pt"
-        class_labels = torch.as_tensor(batch["class_label"], dtype=torch.long)
+        class_labels = batch["class_label"]
+        if hasattr(class_labels, "as_tensor"):
+            class_labels = class_labels.as_tensor()
+        class_labels = torch.as_tensor(class_labels, dtype=torch.long)
         torch.save(
             {
                 "latents": z_mu,

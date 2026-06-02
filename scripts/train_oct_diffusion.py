@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import torch
@@ -51,9 +52,15 @@ def load_latent_split(latents_dir: Path, split: str) -> tuple[torch.Tensor, torc
     labels = []
     for shard in manifest["shards"]:
         data = torch.load(latents_dir / shard["path"], map_location="cpu", weights_only=False)
-        latents.append(data["latents"].float())
-        labels.append(data["class_labels"].long())
-    return torch.cat(latents, dim=0), torch.cat(labels, dim=0)
+        shard_latents = data["latents"]
+        if hasattr(shard_latents, "as_tensor"):
+            shard_latents = shard_latents.as_tensor()
+        latents.append(shard_latents.detach().float())
+        shard_labels = data["class_labels"]
+        if hasattr(shard_labels, "as_tensor"):
+            shard_labels = shard_labels.as_tensor()
+        labels.append(shard_labels.detach().long())
+    return torch.cat(latents, dim=0).detach(), torch.cat(labels, dim=0).detach()
 
 
 def make_loader(latents: torch.Tensor, labels: torch.Tensor, batch_size: int, shuffle: bool) -> DataLoader:
@@ -154,9 +161,11 @@ def main() -> None:
     global_step = 0
 
     for epoch in range(train_config["n_epochs"]):
+        epoch_start = time.perf_counter()
         unet.train()
         train_loss = 0.0
         train_batches = 0
+        batch_window_start = time.perf_counter()
         for batch_idx, (latents, labels) in limited_batches(train_loader, train_config.get("max_train_batches")):
             latents = latents.to(device) * scale_factor
             labels = drop_labels(labels.to(device), train_config["label_dropout"])
@@ -180,12 +189,16 @@ def main() -> None:
             if wandb_run:
                 wandb_run.log({"train/loss": loss.item(), "global_step": global_step})
             if (batch_idx + 1) % 25 == 0:
-                print(f"epoch {epoch + 1} train batch {batch_idx + 1}: loss={loss.item():.6f}", flush=True)
+                elapsed = time.perf_counter() - batch_window_start
+                print(f"epoch {epoch + 1} train batch {batch_idx + 1}: loss={loss.item():.6f}, last_25_batches_sec={elapsed:.1f}", flush=True)
+                batch_window_start = time.perf_counter()
 
         train_loss /= max(train_batches, 1)
         writer.add_scalar("epoch/train_loss", train_loss, epoch + 1)
+        train_epoch_sec = time.perf_counter() - epoch_start
 
         if (epoch + 1) % train_config["val_interval"] == 0 or epoch + 1 == train_config["n_epochs"]:
+            val_start = time.perf_counter()
             unet.eval()
             val_loss = 0.0
             with torch.no_grad():
@@ -200,7 +213,9 @@ def main() -> None:
                     val_loss += loss_fn(pred.float(), (latents - noise).float()).item()
                     val_batches += 1
             val_loss /= max(val_batches, 1)
+            val_loss_sec = time.perf_counter() - val_start
             writer.add_scalar("val/loss", val_loss, epoch + 1)
+            sample_start = time.perf_counter()
             sample_images_tensor = sample_images(
                 unet,
                 autoencoder,
@@ -214,8 +229,16 @@ def main() -> None:
             )
             sample_path = samples_dir / f"epoch_{epoch + 1:04d}_cfg{train_config['cfg_guidance_scale']}.png"
             grid = save_generation_grid(sample_images_tensor, sample_path, train_config["samples_per_class"])
+            sample_sec = time.perf_counter() - sample_start
             writer.add_image("val/generated_by_class", grid, epoch + 1)
-            metrics = {"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss}
+            metrics = {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_epoch_sec": train_epoch_sec,
+                "val_loss_sec": val_loss_sec,
+                "sample_sec": sample_sec,
+            }
             with (args.output_dir / "latest_metrics.json").open("w") as handle:
                 json.dump(metrics, handle, indent=2)
                 handle.write("\n")
@@ -233,11 +256,18 @@ def main() -> None:
                     {
                         "epoch/train_loss": train_loss,
                         "val/loss": val_loss,
+                        "timing/train_epoch_sec": train_epoch_sec,
+                        "timing/val_loss_sec": val_loss_sec,
+                        "timing/sample_sec": sample_sec,
                         "epoch": epoch + 1,
                         "val/generated_by_class": wandb.Image(str(sample_path), caption="rows: CNV, DME, DRUSEN, NORMAL"),
                     }
                 )
-            print(f"epoch {epoch + 1}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+            print(
+                f"epoch {epoch + 1}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}, "
+                f"train_epoch_sec={train_epoch_sec:.1f}, val_loss_sec={val_loss_sec:.1f}, sample_sec={sample_sec:.1f}",
+                flush=True,
+            )
 
     final_images = sample_images(
         unet,
