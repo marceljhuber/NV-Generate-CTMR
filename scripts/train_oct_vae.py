@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 import torch
@@ -61,7 +62,16 @@ def setup_wandb(enabled: bool, project: str, config: dict):
 
 def make_loader(records: list[dict], transform: Compose, cache_rate: float, batch_size: int, num_workers: int, shuffle: bool) -> DataLoader:
     dataset = CacheDataset(data=records, transform=transform, cache_rate=cache_rate, num_workers=num_workers)
-    return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle, drop_last=shuffle)
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "shuffle": shuffle,
+        "drop_last": shuffle,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if num_workers > 0:
+        loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 4})
+    return DataLoader(dataset, **loader_kwargs)
 
 
 def loss_weighted_sum(losses: dict[str, torch.Tensor], kl_weight: float, ssim_weight: float) -> torch.Tensor:
@@ -150,6 +160,8 @@ def main() -> None:
     early_stop_min_delta = vae_train.get("early_stop_min_delta", 0.0)
     global_step = 0
     for epoch in range(vae_train["n_epochs"]):
+        epoch_start = time.perf_counter()
+        batch_window_start = time.perf_counter()
         autoencoder.train()
         discriminator.train()
         epoch_losses = {"recon_loss": 0.0, "kl_loss": 0.0, "ssim_loss": 0.0}
@@ -200,9 +212,19 @@ def main() -> None:
             writer.add_scalar("train/discriminator_loss", loss_d.item(), global_step)
             if wandb_run:
                 wandb_run.log({f"train/{key}": value.item() for key, value in losses.items()} | {"train/discriminator_loss": loss_d.item()})
+            if (batch_idx + 1) % 100 == 0:
+                elapsed = time.perf_counter() - batch_window_start
+                logging.info("Epoch %d train batch %d: recon_loss=%.6f, last_100_batches_sec=%.1f", epoch + 1, batch_idx + 1, losses["recon_loss"].item(), elapsed)
+                batch_window_start = time.perf_counter()
 
         num_train_batches = max(min(len(train_loader), args.max_train_batches or len(train_loader)), 1)
-        logging.info("Epoch %d train losses: %s", epoch + 1, {key: value / num_train_batches for key, value in epoch_losses.items()})
+        train_epoch_sec = time.perf_counter() - epoch_start
+        logging.info(
+            "Epoch %d train losses: %s, train_epoch_sec=%.1f",
+            epoch + 1,
+            {key: value / num_train_batches for key, value in epoch_losses.items()},
+            train_epoch_sec,
+        )
 
         if (epoch + 1) % vae_train["val_interval"] == 0:
             autoencoder.eval()
@@ -231,6 +253,7 @@ def main() -> None:
 
             val_metrics = {key: value / num_val_batches for key, value in val_totals.items()}
             val_metrics["ssim_score"] = 1.0 - val_metrics["ssim_loss"]
+            val_metrics["train_epoch_sec"] = train_epoch_sec
             for key, value in val_metrics.items():
                 writer.add_scalar(f"val/{key}", value, epoch + 1)
             if recon_grid is not None:
