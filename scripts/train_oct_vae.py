@@ -86,6 +86,12 @@ def assert_finite(name: str, value: torch.Tensor) -> None:
         raise FloatingPointError(f"Non-finite {name}: {value.detach().float().cpu().item()}")
 
 
+def plain_tensor(value: torch.Tensor) -> torch.Tensor:
+    if hasattr(value, "as_tensor"):
+        return value.as_tensor()
+    return value
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
@@ -150,7 +156,7 @@ def main() -> None:
         for batch_idx, batch in enumerate(train_loader):
             if args.max_train_batches is not None and batch_idx >= args.max_train_batches:
                 break
-            images = batch["image"].to(device).contiguous()
+            images = plain_tensor(batch["image"]).to(device).contiguous()
             optimizer_g.zero_grad(set_to_none=True)
             if optimizer_d is not None:
                 optimizer_d.zero_grad(set_to_none=True)
@@ -207,7 +213,7 @@ def main() -> None:
                 for batch_idx, batch in enumerate(val_loader):
                     if args.max_val_batches is not None and batch_idx >= args.max_val_batches:
                         break
-                    images = batch["image"].to(device).contiguous()
+                    images = plain_tensor(batch["image"]).to(device).contiguous()
                     with autocast("cuda", enabled=args.amp):
                         reconstruction, z_mu, z_sigma = autoencoder(images)
                         losses = {

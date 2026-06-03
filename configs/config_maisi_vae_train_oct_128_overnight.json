@@ -4,8 +4,8 @@
         "random_aug": true
     },
     "autoencoder_train": {
-        "batch_size": 32,
-        "val_batch_size": 32,
+        "batch_size": 192,
+        "val_batch_size": 192,
         "lr": 0.0001,
         "kl_weight": 1e-7,
         "ssim_weight": 0.1,
