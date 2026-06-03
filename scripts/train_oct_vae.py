@@ -139,6 +139,9 @@ def main() -> None:
     )
 
     best_val = float("inf")
+    epochs_without_improvement = 0
+    early_stop_patience = vae_train.get("early_stop_patience")
+    early_stop_min_delta = vae_train.get("early_stop_min_delta", 0.0)
     global_step = 0
     for epoch in range(vae_train["n_epochs"]):
         autoencoder.train()
@@ -237,10 +240,20 @@ def main() -> None:
                 wandb_run.log(wandb_log)
             logging.info("Epoch %d validation metrics: %s", epoch + 1, val_metrics)
             write_metrics_json(args.output_dir / "latest_val_metrics.json", {"epoch": epoch + 1, **val_metrics})
-            if val_metrics["loss"] < best_val:
+            if val_metrics["loss"] < best_val - early_stop_min_delta:
                 best_val = val_metrics["loss"]
+                epochs_without_improvement = 0
                 torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_best.pt")
                 write_metrics_json(args.output_dir / "best_val_metrics.json", {"epoch": epoch + 1, **val_metrics})
+            else:
+                epochs_without_improvement += 1
+                if early_stop_patience is not None and epochs_without_improvement >= early_stop_patience:
+                    logging.info(
+                        "Early stopping after %d epochs without validation improvement. Best validation loss: %.6f",
+                        epochs_without_improvement,
+                        best_val,
+                    )
+                    break
 
         torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_latest.pt")
         torch.save(discriminator.state_dict(), args.model_dir / "discriminator_oct_128_latest.pt")
