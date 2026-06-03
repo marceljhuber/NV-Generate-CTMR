@@ -29,12 +29,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"], choices=["train", "val", "test"])
     parser.add_argument("--max-batches", type=int, default=None, help="Optional smoke-test limit per split.")
     parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
+    parser.add_argument("--items-per-shard", type=int, default=8192, help="Approximate number of encoded images per output shard.")
     return parser.parse_args()
 
 
 def load_json(path: Path) -> dict:
     with path.open() as handle:
         return json.load(handle)
+
+
+def plain_tensor(value: torch.Tensor) -> torch.Tensor:
+    if hasattr(value, "as_tensor"):
+        return value.as_tensor()
+    return value
 
 
 def make_loader(records: list[dict], image_size: int, batch_size: int, num_workers: int) -> DataLoader:
@@ -50,38 +57,74 @@ def encode_split(args: argparse.Namespace, split: str, records: list[dict], auto
     loader = make_loader(records, args.image_size, args.batch_size, args.num_workers)
     out_dtype = torch.float16 if args.dtype == "float16" else torch.float32
     count = 0
+    shard_idx = 0
     shard_rows: list[dict] = []
+    pending_latents = []
+    pending_class_labels = []
+    pending_labels = []
+    pending_patient_ids = []
+    pending_image_indices = []
+    pending_relative_paths = []
+    pending_source_splits = []
+
+    def flush_shard() -> None:
+        nonlocal shard_idx, count
+        if not pending_latents:
+            return
+        latents = torch.cat(pending_latents, dim=0).contiguous()
+        class_labels = torch.cat(pending_class_labels, dim=0).contiguous()
+        shard_path = split_dir / f"shard_{shard_idx:06d}.pt"
+        torch.save(
+            {
+                "latents": latents,
+                "class_labels": class_labels,
+                "labels": list(pending_labels),
+                "patient_ids": list(pending_patient_ids),
+                "image_indices": list(pending_image_indices),
+                "relative_paths": list(pending_relative_paths),
+                "source_splits": list(pending_source_splits),
+            },
+            shard_path,
+        )
+        shard_rows.append({"path": str(shard_path.relative_to(args.output_dir)), "num_items": int(latents.shape[0])})
+        count += int(latents.shape[0])
+        shard_idx += 1
+        pending_latents.clear()
+        pending_class_labels.clear()
+        pending_labels.clear()
+        pending_patient_ids.clear()
+        pending_image_indices.clear()
+        pending_relative_paths.clear()
+        pending_source_splits.clear()
 
     for batch_idx, batch in enumerate(loader):
         if args.max_batches is not None and batch_idx >= args.max_batches:
             break
-        images = batch["image"].to(device)
+        images = plain_tensor(batch["image"]).to(device)
         z_mu, _ = autoencoder.encode(images)
         if hasattr(z_mu, "as_tensor"):
             z_mu = z_mu.as_tensor()
         z_mu = z_mu.detach().cpu().to(out_dtype).contiguous()
-        shard_path = split_dir / f"shard_{batch_idx:06d}.pt"
         class_labels = batch["class_label"]
         if hasattr(class_labels, "as_tensor"):
             class_labels = class_labels.as_tensor()
         class_labels = torch.as_tensor(class_labels, dtype=torch.long)
-        torch.save(
-            {
-                "latents": z_mu,
-                "class_labels": class_labels,
-                "labels": list(batch["label"]),
-                "patient_ids": [str(value) for value in batch["patient_id"]],
-                "image_indices": [int(value) for value in batch["image_index"]],
-                "relative_paths": list(batch["relative_path"]),
-                "source_splits": list(batch["source_split"]),
-            },
-            shard_path,
-        )
-        shard_rows.append({"path": str(shard_path.relative_to(args.output_dir)), "num_items": int(z_mu.shape[0])})
-        count += int(z_mu.shape[0])
+        pending_latents.append(z_mu)
+        pending_class_labels.append(class_labels)
+        pending_labels.extend(list(batch["label"]))
+        pending_patient_ids.extend([str(value) for value in batch["patient_id"]])
+        pending_image_indices.extend([int(value) for value in batch["image_index"]])
+        pending_relative_paths.extend(list(batch["relative_path"]))
+        pending_source_splits.extend(list(batch["source_split"]))
+
+        if sum(int(latents.shape[0]) for latents in pending_latents) >= args.items_per_shard:
+            flush_shard()
 
         if (batch_idx + 1) % 100 == 0:
-            print(f"{split}: encoded {count} images")
+            pending_count = sum(int(latents.shape[0]) for latents in pending_latents)
+            print(f"{split}: encoded {count + pending_count} images")
+
+    flush_shard()
 
     manifest_path = args.output_dir / f"{split}_shards.json"
     with manifest_path.open("w") as handle:
