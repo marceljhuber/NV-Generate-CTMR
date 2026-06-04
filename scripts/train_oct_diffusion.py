@@ -43,7 +43,12 @@ def setup_wandb(enabled: bool, project: str, config: dict):
         return None
     import wandb
 
-    return wandb.init(project=project, config=config)
+    run = wandb.init(project=project, config=config)
+    run.define_metric("epoch")
+    run.define_metric("epoch/*", step_metric="epoch")
+    run.define_metric("val/*", step_metric="epoch")
+    run.define_metric("timing/*", step_metric="epoch")
+    return run
 
 
 def load_latent_split(latents_dir: Path, split: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -158,6 +163,9 @@ def main() -> None:
     wandb_run = setup_wandb(args.wandb, args.wandb_project, {"network": network_config, "training": train_config})
     loss_fn = torch.nn.L1Loss()
     best_val = float("inf")
+    epochs_without_improvement = 0
+    early_stop_patience = train_config.get("early_stop_patience")
+    early_stop_min_delta = train_config.get("early_stop_min_delta", 0.0)
     global_step = 0
 
     for epoch in range(train_config["n_epochs"]):
@@ -242,12 +250,15 @@ def main() -> None:
             with (args.output_dir / "latest_metrics.json").open("w") as handle:
                 json.dump(metrics, handle, indent=2)
                 handle.write("\n")
-            if val_loss < best_val:
+            if val_loss < best_val - early_stop_min_delta:
                 best_val = val_loss
+                epochs_without_improvement = 0
                 torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / "diffusion_oct_128_best.pt")
                 with (args.output_dir / "best_metrics.json").open("w") as handle:
                     json.dump(metrics, handle, indent=2)
                     handle.write("\n")
+            else:
+                epochs_without_improvement += 1
             torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / "diffusion_oct_128_latest.pt")
             if wandb_run:
                 import wandb
@@ -268,6 +279,12 @@ def main() -> None:
                 f"train_epoch_sec={train_epoch_sec:.1f}, val_loss_sec={val_loss_sec:.1f}, sample_sec={sample_sec:.1f}",
                 flush=True,
             )
+            if early_stop_patience is not None and epochs_without_improvement >= early_stop_patience:
+                print(
+                    f"early stopping after {epochs_without_improvement} validation checks without improvement; best_val={best_val:.6f}",
+                    flush=True,
+                )
+                break
 
     final_images = sample_images(
         unet,
