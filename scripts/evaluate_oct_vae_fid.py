@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute FID between OCT images and VAE reconstructions.")
     parser.add_argument("--dataset-root", type=Path, default=Path("/home/user/oct-maisi-cache/OCT"))
     parser.add_argument("--manifest", type=Path, default=Path("../../data_splits/kermanyv3_oct/val_manifest.csv"))
+    parser.add_argument("--manifests", type=Path, nargs="+", default=None, help="Optional list of manifests to combine.")
     parser.add_argument("--network-config", type=Path, default=Path("configs/config_network_oct_rflow.json"))
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/oct_vae_fid"))
@@ -96,7 +97,10 @@ def main() -> None:
     device = torch.device("cuda")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    records = load_oct_manifest(args.manifest, args.dataset_root)
+    manifest_paths = args.manifests if args.manifests is not None else [args.manifest]
+    records = []
+    for manifest_path in manifest_paths:
+        records.extend(load_oct_manifest(manifest_path, args.dataset_root))
     sampled_records = stratified_sample(records, args.sample_percent, args.seed, args.max_per_class)
     if len(sampled_records) < 2:
         raise ValueError("Need at least two sampled records for FID.")
@@ -134,6 +138,7 @@ def main() -> None:
     summary = {
         "checkpoint": str(args.checkpoint),
         "manifest": str(args.manifest),
+        "manifests": [str(path) for path in manifest_paths],
         "dataset_root": str(args.dataset_root),
         "image_size": args.image_size,
         "sample_percent": args.sample_percent,
