@@ -166,6 +166,7 @@ def main() -> None:
     epochs_without_improvement = 0
     early_stop_patience = train_config.get("early_stop_patience")
     early_stop_min_delta = train_config.get("early_stop_min_delta", 0.0)
+    checkpoint_prefix = train_config.get("checkpoint_prefix", "diffusion_oct_128")
     global_step = 0
 
     for epoch in range(train_config["n_epochs"]):
@@ -253,13 +254,13 @@ def main() -> None:
             if val_loss < best_val - early_stop_min_delta:
                 best_val = val_loss
                 epochs_without_improvement = 0
-                torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / "diffusion_oct_128_best.pt")
+                torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / f"{checkpoint_prefix}_best.pt")
                 with (args.output_dir / "best_metrics.json").open("w") as handle:
                     json.dump(metrics, handle, indent=2)
                     handle.write("\n")
             else:
                 epochs_without_improvement += 1
-            torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / "diffusion_oct_128_latest.pt")
+            torch.save({"unet_state_dict": unet.state_dict(), "scale_factor": scale_factor.cpu(), "epoch": epoch + 1}, args.model_dir / f"{checkpoint_prefix}_latest.pt")
             if wandb_run:
                 import wandb
 

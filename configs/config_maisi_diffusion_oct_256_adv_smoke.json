@@ -1,0 +1,19 @@
+{
+    "diffusion_train": {
+        "batch_size": 96,
+        "lr": 0.0001,
+        "n_epochs": 2,
+        "val_interval": 1,
+        "label_dropout": 0.15,
+        "num_inference_steps": 10,
+        "cfg_guidance_scale": 2.0,
+        "samples_per_class": 2,
+        "final_samples_per_class": 4,
+        "amp": true,
+        "early_stop_patience": 2,
+        "early_stop_min_delta": 0.0005,
+        "max_train_batches": 20,
+        "max_val_batches": 5,
+        "checkpoint_prefix": "diffusion_oct_256_smoke"
+    }
+}
