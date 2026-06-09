@@ -158,6 +158,11 @@ def main() -> None:
     epochs_without_improvement = 0
     early_stop_patience = vae_train.get("early_stop_patience")
     early_stop_min_delta = vae_train.get("early_stop_min_delta", 0.0)
+    adv_start_epoch = vae_train.get("adv_start_epoch", 0)
+    image_size = data_option["image_size"]
+    autoencoder_best_name = f"autoencoder_oct_{image_size}_best.pt"
+    autoencoder_latest_name = f"autoencoder_oct_{image_size}_latest.pt"
+    discriminator_latest_name = f"discriminator_oct_{image_size}_latest.pt"
     global_step = 0
     for epoch in range(vae_train["n_epochs"]):
         epoch_start = time.perf_counter()
@@ -180,19 +185,21 @@ def main() -> None:
                     "kl_loss": KL_loss(z_mu, z_sigma),
                     "ssim_loss": ssim_loss(reconstruction.float(), images.float()),
                 }
-                if use_adversarial:
+                active_adversarial = use_adversarial and (epoch + 1) >= adv_start_epoch
+                effective_adv_weight = vae_train["adv_weight"] if active_adversarial else 0.0
+                if active_adversarial:
                     logits_fake = discriminator(reconstruction.contiguous().float())[-1]
                     generator_adv = torch.mean((logits_fake - 1.0) ** 2)
                 else:
                     generator_adv = torch.zeros((), device=device)
-                loss_g = loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"]) + vae_train["adv_weight"] * generator_adv
+                loss_g = loss_weighted_sum(losses, vae_train["kl_weight"], vae_train["ssim_weight"]) + effective_adv_weight * generator_adv
                 assert_finite("generator loss", loss_g)
 
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
 
-            if use_adversarial and optimizer_d is not None:
+            if active_adversarial and optimizer_d is not None:
                 with autocast("cuda", enabled=args.amp):
                     logits_fake = discriminator(reconstruction.detach().contiguous().float())[-1]
                     logits_real = discriminator(images.detach().contiguous().float())[-1]
@@ -272,7 +279,7 @@ def main() -> None:
             if val_metrics["loss"] < best_val - early_stop_min_delta:
                 best_val = val_metrics["loss"]
                 epochs_without_improvement = 0
-                torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_best.pt")
+                torch.save(autoencoder.state_dict(), args.model_dir / autoencoder_best_name)
                 write_metrics_json(args.output_dir / "best_val_metrics.json", {"epoch": epoch + 1, **val_metrics})
             else:
                 epochs_without_improvement += 1
@@ -284,8 +291,8 @@ def main() -> None:
                     )
                     break
 
-        torch.save(autoencoder.state_dict(), args.model_dir / "autoencoder_oct_128_latest.pt")
-        torch.save(discriminator.state_dict(), args.model_dir / "discriminator_oct_128_latest.pt")
+        torch.save(autoencoder.state_dict(), args.model_dir / autoencoder_latest_name)
+        torch.save(discriminator.state_dict(), args.model_dir / discriminator_latest_name)
 
     writer.close()
     if wandb_run:

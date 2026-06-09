@@ -1,0 +1,21 @@
+{
+    "data_option": {
+        "image_size": 256,
+        "random_aug": true
+    },
+    "autoencoder_train": {
+        "batch_size": 32,
+        "val_batch_size": 32,
+        "lr": 0.0001,
+        "kl_weight": 1e-7,
+        "ssim_weight": 0.1,
+        "adv_weight": 0.001,
+        "adv_start_epoch": 10,
+        "recon_loss": "l1",
+        "val_interval": 1,
+        "cache": 0.0,
+        "n_epochs": 999,
+        "early_stop_patience": 25,
+        "early_stop_min_delta": 0.00005
+    }
+}
