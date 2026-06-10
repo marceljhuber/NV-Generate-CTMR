@@ -158,9 +158,10 @@ def main() -> None:
     for manifest_path in args.manifests:
         records.extend(load_oct_manifest(manifest_path, args.dataset_root))
     real_counts = count_by_class(records)
+    proportional_counts = {label: max(1, round(count * args.sample_percent / 100.0)) for label, count in real_counts.items()}
 
     if args.generation_mode == "unconditional":
-        total_target = sum(max(1, round(count * args.sample_percent / 100.0)) for count in real_counts.values())
+        total_target = sum(proportional_counts.values())
         synth_counts = {"unknown": total_target}
     elif args.generation_mode == "balanced":
         per_class = max(1, round(sum(real_counts.values()) * args.sample_percent / 100.0 / max(len(real_counts), 1)))
@@ -171,9 +172,9 @@ def main() -> None:
         target_for_class = max(1, round(real_counts.get(args.single_class, 0) * args.sample_percent / 100.0))
         synth_counts = {args.single_class: target_for_class}
     else:
-        synth_counts = {label: max(1, round(count * args.sample_percent / 100.0)) for label, count in real_counts.items()}
+        synth_counts = proportional_counts
 
-    real_sampled_records = stratified_sample(records, synth_counts, args.seed)
+    real_sampled_records = stratified_sample(records, proportional_counts, args.seed)
 
     transform = define_oct_image_transform(image_size=args.image_size, is_train=False, output_dtype=torch.float32, random_aug=False)
     dataset = Dataset(data=real_sampled_records, transform=transform)
