@@ -39,6 +39,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-inference-steps", type=int, default=30)
     parser.add_argument("--cfg-guidance-scale", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--generation-mode",
+        choices=["proportional", "balanced", "unconditional", "single-class"],
+        default="proportional",
+        help="How to allocate generated images across classes. 'unconditional' uses class 0 for every generated image.",
+    )
+    parser.add_argument(
+        "--single-class",
+        choices=sorted(OCT_LABEL_TO_ID),
+        default=None,
+        help="If --generation-mode single-class, generate only images for this class label.",
+    )
     parser.add_argument("--save-generated", action="store_true")
     return parser.parse_args()
 
@@ -146,7 +158,21 @@ def main() -> None:
     for manifest_path in args.manifests:
         records.extend(load_oct_manifest(manifest_path, args.dataset_root))
     real_counts = count_by_class(records)
-    synth_counts = {label: max(1, round(count * args.sample_percent / 100.0)) for label, count in real_counts.items()}
+
+    if args.generation_mode == "unconditional":
+        total_target = sum(max(1, round(count * args.sample_percent / 100.0)) for count in real_counts.values())
+        synth_counts = {"unknown": total_target}
+    elif args.generation_mode == "balanced":
+        per_class = max(1, round(sum(real_counts.values()) * args.sample_percent / 100.0 / max(len(real_counts), 1)))
+        synth_counts = {label: per_class for label in sorted(real_counts)}
+    elif args.generation_mode == "single-class":
+        if args.single_class is None:
+            raise ValueError("--single-class is required for --generation-mode single-class.")
+        target_for_class = max(1, round(real_counts.get(args.single_class, 0) * args.sample_percent / 100.0))
+        synth_counts = {args.single_class: target_for_class}
+    else:
+        synth_counts = {label: max(1, round(count * args.sample_percent / 100.0)) for label, count in real_counts.items()}
+
     real_sampled_records = stratified_sample(records, synth_counts, args.seed)
 
     transform = define_oct_image_transform(image_size=args.image_size, is_train=False, output_dtype=torch.float32, random_aug=False)
@@ -225,6 +251,8 @@ def main() -> None:
         "sample_percent": args.sample_percent,
         "num_inference_steps": args.num_inference_steps,
         "cfg_guidance_scale": args.cfg_guidance_scale,
+        "generation_mode": args.generation_mode,
+        "single_class": args.single_class,
         "real_counts_full": real_counts,
         "target_counts_by_class": synth_counts,
         "generated_counts_by_class": generated_counts,
