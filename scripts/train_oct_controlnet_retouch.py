@@ -112,6 +112,9 @@ class RetouchControlNetDataset(Dataset):
         # Match the OCT orientation used by the Kermany-trained 256 VAE/diffusion.
         image = np.rot90(image, k=-1).copy()
         label_mask = np.rot90(label_mask, k=-1).copy()
+        # RETOUCH raw OCT intensities use a white background; Kermany-trained OCT
+        # models expect the common dark-background convention.
+        image = 255 - image
 
         image = resize_image_array(image, self.image_size, is_mask=False).astype(np.float32) / 255.0
         label_mask = resize_image_array(label_mask, self.image_size, is_mask=True).astype(np.int64)
