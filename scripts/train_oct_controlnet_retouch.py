@@ -256,6 +256,9 @@ def main() -> None:
         {"network": network_config, "training": train_config, "splits": args.splits, "records": len(records), "fluid_slices": fluid_slices},
     )
     best_loss = float("inf")
+    epochs_without_improvement = 0
+    early_stop_patience = train_config.get("early_stop_patience")
+    early_stop_min_delta = train_config.get("early_stop_min_delta", 0.0)
     global_step = 0
     checkpoint_prefix = train_config["checkpoint_prefix"]
     for epoch in range(train_config["n_epochs"]):
@@ -299,10 +302,13 @@ def main() -> None:
         write_metrics(args.output_dir / "latest_metrics.json", metrics)
         controlnet_state = controlnet.state_dict()
         torch.save({"epoch": epoch + 1, "loss": epoch_loss, "controlnet_state_dict": controlnet_state, "scale_factor": scale_factor.detach().cpu(), "train_config": train_config}, args.model_dir / f"{checkpoint_prefix}_latest.pt")
-        if epoch_loss < best_loss:
+        if epoch_loss < best_loss - early_stop_min_delta:
             best_loss = epoch_loss
+            epochs_without_improvement = 0
             torch.save({"epoch": epoch + 1, "loss": best_loss, "controlnet_state_dict": controlnet_state, "scale_factor": scale_factor.detach().cpu(), "train_config": train_config}, args.model_dir / f"{checkpoint_prefix}_best.pt")
             write_metrics(args.output_dir / "best_metrics.json", metrics)
+        else:
+            epochs_without_improvement += 1
 
         sample_path = None
         mask_path = None
@@ -322,6 +328,12 @@ def main() -> None:
                 log_data["samples/masks"] = wandb.Image(str(mask_path))
             wandb_run.log(log_data)
         print(f"epoch {epoch + 1}: train_loss={epoch_loss:.6f}, epoch_sec={epoch_sec:.1f}", flush=True)
+        if early_stop_patience is not None and epochs_without_improvement >= early_stop_patience:
+            print(
+                f"early stopping after {epochs_without_improvement} epochs without improvement; best_loss={best_loss:.6f}",
+                flush=True,
+            )
+            break
 
     writer.close()
     if wandb_run:
