@@ -93,6 +93,28 @@ def resize_image_array(array: np.ndarray, image_size: int, is_mask: bool) -> np.
     return np.asarray(Image.fromarray(array).resize((image_size, image_size), mode))
 
 
+def scale_image_minmax(array: np.ndarray) -> np.ndarray:
+    image = array.astype(np.float32)
+    image_min = float(image.min())
+    image_max = float(image.max())
+    if image_max <= image_min:
+        return np.zeros_like(image, dtype=np.float32)
+    return (image - image_min) / (image_max - image_min)
+
+
+def tensor_stats(tensor: torch.Tensor) -> dict[str, float]:
+    values = tensor.detach().float().cpu()
+    return {
+        "min": float(values.min()),
+        "p01": float(torch.quantile(values.flatten(), 0.01)),
+        "p50": float(torch.quantile(values.flatten(), 0.50)),
+        "p99": float(torch.quantile(values.flatten(), 0.99)),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "std": float(values.std(unbiased=False)),
+    }
+
+
 class RetouchControlNetDataset(Dataset):
     def __init__(self, records: list[dict], image_size: int, augment: bool = True) -> None:
         self.records = records
@@ -112,12 +134,7 @@ class RetouchControlNetDataset(Dataset):
         # Match the OCT orientation used by the Kermany-trained 256 VAE/diffusion.
         image = np.rot90(image, k=-1).copy()
         label_mask = np.rot90(label_mask, k=-1).copy()
-        # RETOUCH Spectralis volumes use a white-background convention, while
-        # Cirrus/Topcon are already close to the Kermany dark-background OCT convention.
-        if record["scanner"] == "Spectralis":
-            image = 255 - image
-
-        image = resize_image_array(image, self.image_size, is_mask=False).astype(np.float32) / 255.0
+        image = scale_image_minmax(resize_image_array(image, self.image_size, is_mask=False))
         label_mask = resize_image_array(label_mask, self.image_size, is_mask=True).astype(np.int64)
 
         if self.augment and random.random() < 0.5:
@@ -253,6 +270,10 @@ def main() -> None:
     loader = make_loader(records, train_config)
     sample_dataset = RetouchControlNetDataset([record for record in records if record["has_fluid"]][: train_config["num_sample_masks"]], train_config["image_size"], augment=False)
     sample_masks = torch.stack([sample_dataset[index]["mask"] for index in range(len(sample_dataset))])
+    stats_dataset = RetouchControlNetDataset(records[: min(len(records), 128)], train_config["image_size"], augment=False)
+    input_stats = tensor_stats(torch.stack([stats_dataset[index]["image"] for index in range(len(stats_dataset))]))
+    write_metrics(args.output_dir / "input_intensity_stats.json", input_stats)
+    print(f"Input intensity stats after preprocessing: {input_stats}", flush=True)
 
     optimizer = torch.optim.AdamW(controlnet.parameters(), lr=train_config["lr"])
     scaler = GradScaler("cuda", enabled=train_config["amp"])
@@ -322,10 +343,14 @@ def main() -> None:
         mask_path = None
         if (epoch + 1) % train_config["sample_interval"] == 0 and len(sample_masks) > 0:
             generated = sample_controlnet_images(autoencoder, unet, controlnet, scheduler, sample_masks, scale_factor, train_config, device)
+            generated_stats = tensor_stats(generated)
             sample_path = samples_dir / f"epoch_{epoch + 1:04d}_generated.png"
             mask_path = samples_dir / f"epoch_{epoch + 1:04d}_masks.png"
             save_image(make_grid(generated, nrow=len(generated), padding=2), sample_path)
             save_image(make_grid(make_mask_grid(sample_masks), nrow=len(sample_masks), padding=2), mask_path)
+            write_metrics(samples_dir / f"epoch_{epoch + 1:04d}_generated_stats.json", generated_stats)
+        else:
+            generated_stats = None
 
         if wandb_run:
             log_data = {"epoch": epoch + 1, "epoch/train_loss": epoch_loss, "timing/epoch_sec": epoch_sec}
@@ -334,6 +359,7 @@ def main() -> None:
 
                 log_data["samples/generated"] = wandb.Image(str(sample_path))
                 log_data["samples/masks"] = wandb.Image(str(mask_path))
+                log_data.update({f"samples/generated_{key}": value for key, value in (generated_stats or {}).items()})
             wandb_run.log(log_data)
         print(f"epoch {epoch + 1}: train_loss={epoch_loss:.6f}, epoch_sec={epoch_sec:.1f}", flush=True)
         if early_stop_patience is not None and epochs_without_improvement >= early_stop_patience:

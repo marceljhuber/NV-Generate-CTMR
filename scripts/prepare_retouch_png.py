@@ -92,6 +92,16 @@ def save_png(path: Path, image: np.ndarray) -> None:
     imsave(path, image, check_contrast=False)
 
 
+def scale_oct_slice_to_uint8(image: np.ndarray) -> np.ndarray:
+    image = image.astype(np.float32)
+    image_min = float(image.min())
+    image_max = float(image.max())
+    if image_max <= image_min:
+        return np.zeros_like(image, dtype=np.uint8)
+    image = (image - image_min) / (image_max - image_min)
+    return np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
+
+
 def convert_case(case_dir: Path, retouch_root: Path, output_root: Path) -> tuple[list[dict[str, str | int | float]], dict[str, str | int]]:
     oct_volume, oct_header = read_mhd_volume(case_dir / "oct.mhd")
     ref_volume, ref_header = read_mhd_volume(case_dir / "reference.mhd")
@@ -109,12 +119,13 @@ def convert_case(case_dir: Path, retouch_root: Path, output_root: Path) -> tuple
     for index in range(oct_volume.shape[0]):
         oct_slice = oct_volume[index].T
         mask_slice = ref_volume[index].T
-        unique_labels.update(int(value) for value in np.unique(mask_slice))
+        slice_labels = {int(value) for value in np.unique(mask_slice)}
+        unique_labels.update(slice_labels)
 
         stem = f"slice_{index:03d}.png"
         image_path = output_root / "images" / scanner / split / case_id / stem
         mask_path = output_root / "masks_label" / scanner / split / case_id / stem
-        save_png(image_path, oct_slice)
+        save_png(image_path, scale_oct_slice_to_uint8(oct_slice))
         save_png(mask_path, mask_slice.astype(np.uint8))
 
         binary_paths: dict[str, str] = {}
@@ -141,6 +152,11 @@ def convert_case(case_dir: Path, retouch_root: Path, output_root: Path) -> tuple
                 "spacing_y": spacing[1],
                 "spacing_z": spacing[2],
                 "raw_case_dir": str(case_dir),
+                "has_fluid": int(any(label in slice_labels for label in LABELS)),
+                "label_values": " ".join(str(value) for value in sorted(slice_labels)),
+                "has_irf": int(1 in slice_labels),
+                "has_srf": int(2 in slice_labels),
+                "has_ped": int(3 in slice_labels),
             }
         )
 
