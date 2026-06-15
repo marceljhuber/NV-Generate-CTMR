@@ -93,6 +93,17 @@ def resize_image_array(array: np.ndarray, image_size: int, is_mask: bool) -> np.
     return np.asarray(Image.fromarray(array).resize((image_size, image_size), mode))
 
 
+def translate_array(array: np.ndarray, dx: int, dy: int, is_mask: bool) -> np.ndarray:
+    mode = Image.Resampling.NEAREST if is_mask else Image.Resampling.BILINEAR
+    image = Image.fromarray(array)
+    return np.asarray(image.transform(image.size, Image.Transform.AFFINE, (1, 0, -dx, 0, 1, -dy), resample=mode, fillcolor=0))
+
+
+def rotate_array(array: np.ndarray, angle_degrees: float, is_mask: bool) -> np.ndarray:
+    mode = Image.Resampling.NEAREST if is_mask else Image.Resampling.BILINEAR
+    return np.asarray(Image.fromarray(array).rotate(angle_degrees, resample=mode, fillcolor=0))
+
+
 def scale_image_minmax(array: np.ndarray) -> np.ndarray:
     image = array.astype(np.float32)
     image_min = float(image.min())
@@ -141,6 +152,22 @@ class RetouchControlNetDataset(Dataset):
         if self.augment and random.random() < 0.5:
             image = np.flip(image, axis=1).copy()
             label_mask = np.flip(label_mask, axis=1).copy()
+
+        if self.augment and random.random() < self.augment_config.get("affine_prob", 0.0):
+            max_rotate_degrees = self.augment_config.get("max_rotate_degrees", 0.0)
+            max_translate_fraction = self.augment_config.get("max_translate_fraction", 0.0)
+            angle = random.uniform(-max_rotate_degrees, max_rotate_degrees)
+            max_translate = int(round(self.image_size * max_translate_fraction))
+            dx = random.randint(-max_translate, max_translate) if max_translate > 0 else 0
+            dy = random.randint(-max_translate, max_translate) if max_translate > 0 else 0
+            image_uint8 = np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
+            if angle != 0.0:
+                image_uint8 = rotate_array(image_uint8, angle, is_mask=False)
+                label_mask = rotate_array(label_mask.astype(np.uint8), angle, is_mask=True).astype(np.int64)
+            if dx != 0 or dy != 0:
+                image_uint8 = translate_array(image_uint8, dx, dy, is_mask=False)
+                label_mask = translate_array(label_mask.astype(np.uint8), dx, dy, is_mask=True).astype(np.int64)
+            image = image_uint8.astype(np.float32) / 255.0
 
         if self.augment:
             if random.random() < self.augment_config.get("gamma_prob", 0.0):
