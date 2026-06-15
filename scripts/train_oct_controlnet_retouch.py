@@ -116,10 +116,11 @@ def tensor_stats(tensor: torch.Tensor) -> dict[str, float]:
 
 
 class RetouchControlNetDataset(Dataset):
-    def __init__(self, records: list[dict], image_size: int, augment: bool = True) -> None:
+    def __init__(self, records: list[dict], image_size: int, augment: bool = True, augment_config: dict | None = None) -> None:
         self.records = records
         self.image_size = image_size
         self.augment = augment
+        self.augment_config = augment_config or {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -141,6 +142,19 @@ class RetouchControlNetDataset(Dataset):
             image = np.flip(image, axis=1).copy()
             label_mask = np.flip(label_mask, axis=1).copy()
 
+        if self.augment:
+            if random.random() < self.augment_config.get("gamma_prob", 0.0):
+                gamma_low, gamma_high = self.augment_config.get("gamma_range", [0.85, 1.15])
+                image = np.power(image, random.uniform(gamma_low, gamma_high)).astype(np.float32)
+            if random.random() < self.augment_config.get("intensity_prob", 0.0):
+                scale_low, scale_high = self.augment_config.get("scale_range", [0.95, 1.05])
+                shift_low, shift_high = self.augment_config.get("shift_range", [-0.02, 0.02])
+                image = image * random.uniform(scale_low, scale_high) + random.uniform(shift_low, shift_high)
+                image = np.clip(image, 0.0, 1.0).astype(np.float32)
+            if random.random() < self.augment_config.get("noise_prob", 0.0):
+                image = image + np.random.normal(0.0, self.augment_config.get("noise_std", 0.005), size=image.shape).astype(np.float32)
+                image = np.clip(image, 0.0, 1.0).astype(np.float32)
+
         cond = np.stack([(label_mask == label_value).astype(np.float32) for label_value in FLUID_LABELS], axis=0)
         return {
             "image": torch.from_numpy(image).unsqueeze(0),
@@ -153,7 +167,7 @@ class RetouchControlNetDataset(Dataset):
 
 
 def make_loader(records: list[dict], train_config: dict) -> DataLoader:
-    dataset = RetouchControlNetDataset(records, image_size=train_config["image_size"], augment=True)
+    dataset = RetouchControlNetDataset(records, image_size=train_config["image_size"], augment=True, augment_config=train_config.get("augmentations"))
     weights = [train_config["foreground_sample_weight"] if record["has_fluid"] else train_config["empty_sample_weight"] for record in records]
     sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
     return DataLoader(
