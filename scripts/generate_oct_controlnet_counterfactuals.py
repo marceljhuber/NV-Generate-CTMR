@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class-label", type=int, default=0)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--grid-chunk-size", type=int, default=10)
+    parser.add_argument("--input-source", choices=["kermany-normal", "retouch-empty-neighbor"], default="kermany-normal")
+    parser.add_argument("--max-neighbor-distance", type=int, default=8)
     return parser.parse_args()
 
 
@@ -52,7 +54,7 @@ def load_retouch_records(manifest: Path) -> list[dict]:
     return records
 
 
-def select_inputs(args: argparse.Namespace) -> tuple[torch.Tensor, list[dict]]:
+def select_kermany_inputs(args: argparse.Namespace) -> tuple[torch.Tensor, list[dict]]:
     records = load_oct_manifest(args.kermany_manifest, args.kermany_root)
     normal_records = [record for record in records if record["label"] == "NORMAL"]
     if len(normal_records) < args.num_images:
@@ -61,6 +63,43 @@ def select_inputs(args: argparse.Namespace) -> tuple[torch.Tensor, list[dict]]:
     transform = define_oct_image_transform(256, is_train=False, random_aug=False)
     images = torch.stack([transform(record)["image"] for record in chosen])
     return images, chosen
+
+
+def select_retouch_empty_neighbor_pairs(args: argparse.Namespace) -> tuple[torch.Tensor, torch.Tensor, list[dict], list[dict]]:
+    retouch_records = load_retouch_records(args.retouch_manifest)
+    by_case: dict[str, list[dict]] = {}
+    for record in retouch_records:
+        if record.get("scanner") != "Spectralis" or record.get("split") not in {"train", "test_muw"}:
+            continue
+        by_case.setdefault(record["case_id"], []).append(record)
+
+    pairs: list[tuple[dict, dict, int]] = []
+    for records in by_case.values():
+        records = sorted(records, key=lambda row: int(row["slice_index"]))
+        fluid_records = [record for record in records if record["has_fluid"]]
+        empty_records = [record for record in records if not record["has_fluid"]]
+        if not fluid_records or not empty_records:
+            continue
+        for empty in empty_records:
+            empty_index = int(empty["slice_index"])
+            nearest = min(fluid_records, key=lambda record: abs(int(record["slice_index"]) - empty_index))
+            distance = abs(int(nearest["slice_index"]) - empty_index)
+            if distance <= args.max_neighbor_distance:
+                pairs.append((empty, nearest, distance))
+
+    if len(pairs) < args.num_images:
+        raise ValueError(f"Requested {args.num_images} RETOUCH empty-neighbor pairs, found {len(pairs)} within distance {args.max_neighbor_distance}")
+    chosen = random.sample(pairs, args.num_images)
+    input_dataset = RetouchControlNetDataset([pair[0] for pair in chosen], image_size=256, augment=False)
+    mask_dataset = RetouchControlNetDataset([pair[1] for pair in chosen], image_size=256, augment=False)
+    images = torch.stack([input_dataset[index]["image"] for index in range(len(chosen))])
+    masks = torch.stack([mask_dataset[index]["mask"] for index in range(len(chosen))])
+    image_records = []
+    mask_records = []
+    for source, target, distance in chosen:
+        image_records.append(source | {"neighbor_distance": distance, "target_slice_index": target["slice_index"]})
+        mask_records.append(target | {"neighbor_distance": distance, "source_slice_index": source["slice_index"]})
+    return images, masks, image_records, mask_records
 
 
 def select_masks(args: argparse.Namespace) -> tuple[torch.Tensor, list[dict]]:
@@ -183,8 +222,11 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device("cuda")
 
-    images, image_records = select_inputs(args)
-    masks, mask_records = select_masks(args)
+    if args.input_source == "kermany-normal":
+        images, image_records = select_kermany_inputs(args)
+        masks, mask_records = select_masks(args)
+    else:
+        images, masks, image_records, mask_records = select_retouch_empty_neighbor_pairs(args)
     models = load_models(args, device)
     pure = generate_pure(args, masks, models, device)
     edits = {strength: generate_img2img(args, images, masks, strength, models, device) for strength in args.strengths}
