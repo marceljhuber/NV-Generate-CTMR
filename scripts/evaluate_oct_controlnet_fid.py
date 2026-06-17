@@ -11,10 +11,12 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from monai.data import DataLoader, Dataset
 from monai.metrics.fid import FIDMetric
+from PIL import Image
 from torchvision.models import Inception_V3_Weights, inception_v3
 from torchvision.utils import make_grid, save_image
 
@@ -42,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conditioning-scale", type=float, default=1.0)
     parser.add_argument("--class-label", type=int, default=0)
     parser.add_argument("--save-generated", action="store_true")
+    parser.add_argument("--reuse-generated-dir", type=Path, default=None, help="Directory of previously saved generated PNGs to reuse instead of regenerating.")
     parser.add_argument("--seed", type=int, default=777)
     return parser.parse_args()
 
@@ -84,6 +87,37 @@ class InceptionFeatures(torch.nn.Module):
             images = images.repeat(1, 3, 1, 1)
         images = F.interpolate(images, size=(299, 299), mode="bilinear", align_corners=False)
         return self.model((images - self.mean.to(images.device)) / self.std.to(images.device))
+
+
+class GeneratedPngDataset(torch.utils.data.Dataset):
+    def __init__(self, image_paths: list[Path]) -> None:
+        self.image_paths = image_paths
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        with Image.open(self.image_paths[index]) as image_file:
+            image = torch.from_numpy(np.asarray(image_file.convert("L")).copy()).float().unsqueeze(0) / 255.0
+        return image
+
+
+def safe_tensor_stats(tensor: torch.Tensor, max_values: int = 1_000_000) -> dict[str, float]:
+    values = tensor.detach().float().cpu().flatten()
+    if values.numel() > max_values:
+        step = max(1, values.numel() // max_values)
+        quantile_values = values[::step]
+    else:
+        quantile_values = values
+    return {
+        "min": float(values.min()),
+        "p01": float(torch.quantile(quantile_values, 0.01)),
+        "p50": float(torch.quantile(quantile_values, 0.50)),
+        "p99": float(torch.quantile(quantile_values, 0.99)),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "std": float(values.std(unbiased=False)),
+    }
 
 
 def sample_records(records: list[dict], n: int, seed: int) -> list[dict]:
@@ -189,30 +223,51 @@ def main() -> None:
     models = load_models(args, device)
     feature_net = InceptionFeatures().to(device).eval()
 
-    generated_features = []
-    generated_preview = []
-    mask_preview = []
-    generated_stats_batches = []
-    for start in range(0, len(selected_mask_records), args.batch_size):
-        end = min(start + args.batch_size, len(selected_mask_records))
-        masks = torch.stack([mask_dataset[index]["mask"] for index in range(start, end)])
-        generated = generate_controlnet_batch(args, masks, models, device)
-        generated_features.append(feature_net(generated).detach().cpu())
-        generated_stats_batches.append(generated.cpu())
-        if len(generated_preview) < 32:
-            keep = min(generated.shape[0], 32 - len(generated_preview))
-            generated_preview.extend(generated[:keep].cpu())
-            mask_preview.extend(make_mask_grid(masks[:keep]))
-        if args.save_generated:
-            for offset, image in enumerate(generated.cpu()):
-                save_image(image, generated_dir / f"controlnet_{start + offset:06d}.png")
-        if (start // args.batch_size + 1) % 5 == 0 or end == len(selected_mask_records):
-            print(f"generated {end}/{len(selected_mask_records)} ControlNet samples", flush=True)
-
-    generated_features_tensor = torch.cat(generated_features, dim=0)
-    generated_images_tensor = torch.cat(generated_stats_batches, dim=0)
-    save_image(make_grid(torch.stack(generated_preview), nrow=8, padding=2), args.output_dir / "generated_preview_grid.png")
-    save_image(make_grid(torch.stack(mask_preview), nrow=8, padding=2), args.output_dir / "mask_preview_grid.png")
+    if args.reuse_generated_dir is not None:
+        generated_paths = sorted(args.reuse_generated_dir.glob("*.png"))[: args.num_generated]
+        if len(generated_paths) < args.num_generated:
+            raise ValueError(f"Requested {args.num_generated} generated PNGs, found {len(generated_paths)} in {args.reuse_generated_dir}")
+        generated_loader = DataLoader(GeneratedPngDataset(generated_paths), batch_size=args.feature_batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+        generated_features = []
+        generated_stats_batches = []
+        preview = []
+        for batch_idx, images in enumerate(generated_loader):
+            images = images.to(device, non_blocking=True)
+            generated_features.append(feature_net(images).detach().cpu())
+            generated_stats_batches.append(images.detach().cpu())
+            if len(preview) < 32:
+                keep = min(images.shape[0], 32 - len(preview))
+                preview.extend(images[:keep].detach().cpu())
+            if (batch_idx + 1) % 10 == 0:
+                print(f"generated PNG features: processed {(batch_idx + 1) * args.feature_batch_size} images", flush=True)
+        generated_features_tensor = torch.cat(generated_features, dim=0)
+        generated_images_tensor = torch.cat(generated_stats_batches, dim=0)
+        if preview:
+            save_image(make_grid(torch.stack(preview), nrow=8, padding=2), args.output_dir / "generated_preview_grid.png")
+    else:
+        generated_features = []
+        generated_preview = []
+        mask_preview = []
+        generated_stats_batches = []
+        for start in range(0, len(selected_mask_records), args.batch_size):
+            end = min(start + args.batch_size, len(selected_mask_records))
+            masks = torch.stack([mask_dataset[index]["mask"] for index in range(start, end)])
+            generated = generate_controlnet_batch(args, masks, models, device)
+            generated_features.append(feature_net(generated).detach().cpu())
+            generated_stats_batches.append(generated.cpu())
+            if len(generated_preview) < 32:
+                keep = min(generated.shape[0], 32 - len(generated_preview))
+                generated_preview.extend(generated[:keep].cpu())
+                mask_preview.extend(make_mask_grid(masks[:keep]))
+            if args.save_generated:
+                for offset, image in enumerate(generated.cpu()):
+                    save_image(image, generated_dir / f"controlnet_{start + offset:06d}.png")
+            if (start // args.batch_size + 1) % 5 == 0 or end == len(selected_mask_records):
+                print(f"generated {end}/{len(selected_mask_records)} ControlNet samples", flush=True)
+        generated_features_tensor = torch.cat(generated_features, dim=0)
+        generated_images_tensor = torch.cat(generated_stats_batches, dim=0)
+        save_image(make_grid(torch.stack(generated_preview), nrow=8, padding=2), args.output_dir / "generated_preview_grid.png")
+        save_image(make_grid(torch.stack(mask_preview), nrow=8, padding=2), args.output_dir / "mask_preview_grid.png")
 
     retouch_fluid_dataset = RetouchControlNetDataset(sample_records(fluid_records, args.num_reference, args.seed + 1), image_size=256, augment=False)
     retouch_all_dataset = RetouchControlNetDataset(sample_records(all_records, args.num_reference, args.seed + 2), image_size=256, augment=False)
@@ -246,7 +301,7 @@ def main() -> None:
         "num_inference_steps": args.num_inference_steps,
         "conditioning_scale": args.conditioning_scale,
         "class_label": args.class_label,
-        "generated_stats": tensor_stats(generated_images_tensor),
+        "generated_stats": safe_tensor_stats(generated_images_tensor),
         "reference_feature_counts": {name: int(features.shape[0]) for name, features in references.items()},
         "fid_generated_vs_reference": fids,
         "feature_model": "torchvision.inception_v3_imagenet_fc_features",
