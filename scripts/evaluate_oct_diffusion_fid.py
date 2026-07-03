@@ -174,7 +174,8 @@ def main() -> None:
     else:
         synth_counts = proportional_counts
 
-    real_sampled_records = stratified_sample(records, proportional_counts, args.seed)
+    real_sample_counts = synth_counts if args.generation_mode == "single-class" else proportional_counts
+    real_sampled_records = stratified_sample(records, real_sample_counts, args.seed)
 
     transform = define_oct_image_transform(image_size=args.image_size, is_train=False, output_dtype=torch.float32, random_aug=False)
     dataset = Dataset(data=real_sampled_records, transform=transform)
@@ -255,6 +256,7 @@ def main() -> None:
         "generation_mode": args.generation_mode,
         "single_class": args.single_class,
         "real_counts_full": real_counts,
+        "real_counts_for_fid": real_sample_counts,
         "target_counts_by_class": synth_counts,
         "generated_counts_by_class": generated_counts,
         "num_real_images_for_fid": int(real_features_tensor.shape[0]),

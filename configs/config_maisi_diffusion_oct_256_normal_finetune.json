@@ -1,0 +1,18 @@
+{
+    "diffusion_train": {
+        "batch_size": 96,
+        "lr": 0.00005,
+        "n_epochs": 80,
+        "val_interval": 5,
+        "label_dropout": 0.0,
+        "num_inference_steps": 75,
+        "cfg_guidance_scale": 0.0,
+        "samples_per_class": 8,
+        "final_samples_per_class": 25,
+        "sample_class_ids": [4],
+        "amp": true,
+        "early_stop_patience": 4,
+        "early_stop_min_delta": 0.0003,
+        "checkpoint_prefix": "diffusion_oct_256_normal_finetune"
+    }
+}

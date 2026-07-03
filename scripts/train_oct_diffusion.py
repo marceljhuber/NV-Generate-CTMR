@@ -27,8 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-config", type=Path, default=Path("configs/config_maisi_diffusion_oct_128_50epochs.json"))
     parser.add_argument("--model-dir", type=Path, default=Path("models/oct_diffusion_128_50epochs"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/oct_diffusion_128_50epochs"))
+    parser.add_argument("--init-diffusion-checkpoint", type=Path, default=None, help="Optional diffusion checkpoint to initialize the UNet before training/fine-tuning.")
+    parser.add_argument("--label-filter", type=int, nargs="+", default=None, help="Optional class IDs to keep from latent shards, e.g. 4 for Kermany NORMAL-only diffusion.")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="oct-maisi")
+    parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -38,12 +41,12 @@ def load_json(path: Path) -> dict:
         return json.load(handle)
 
 
-def setup_wandb(enabled: bool, project: str, config: dict):
+def setup_wandb(enabled: bool, project: str, name: str | None, config: dict):
     if not enabled:
         return None
     import wandb
 
-    run = wandb.init(project=project, config=config)
+    run = wandb.init(project=project, name=name, config=config)
     run.define_metric("epoch")
     run.define_metric("epoch/*", step_metric="epoch")
     run.define_metric("val/*", step_metric="epoch")
@@ -72,6 +75,17 @@ def make_loader(latents: torch.Tensor, labels: torch.Tensor, batch_size: int, sh
     return DataLoader(TensorDataset(latents, labels), batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=shuffle)
 
 
+def filter_latents_by_label(latents: torch.Tensor, labels: torch.Tensor, label_filter: list[int] | None) -> tuple[torch.Tensor, torch.Tensor]:
+    if not label_filter:
+        return latents, labels
+    keep = torch.zeros_like(labels, dtype=torch.bool)
+    for label in label_filter:
+        keep |= labels == label
+    if not bool(keep.any()):
+        raise ValueError(f"Label filter {label_filter} removed all latent samples.")
+    return latents[keep], labels[keep]
+
+
 def limited_batches(loader: DataLoader, max_batches: int | None):
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -97,6 +111,7 @@ def sample_images(
     samples_per_class: int,
     num_inference_steps: int,
     cfg_guidance_scale: float,
+    class_ids: list[int] | None = None,
 ) -> torch.Tensor:
     unet.eval()
     autoencoder.eval()
@@ -105,7 +120,7 @@ def sample_images(
     timesteps = scheduler.timesteps
     next_timesteps = torch.cat((timesteps[1:], torch.tensor([0], dtype=timesteps.dtype)))
 
-    for class_id in [1, 2, 3, 4]:
+    for class_id in (class_ids or [1, 2, 3, 4]):
         image = torch.randn((samples_per_class, *latent_shape), device=device)
         labels = torch.full((samples_per_class,), class_id, dtype=torch.long, device=device)
         for timestep, next_timestep in zip(timesteps, next_timesteps):
@@ -149,18 +164,28 @@ def main() -> None:
     autoencoder.load_state_dict(torch.load(args.vae_checkpoint, map_location=device, weights_only=True))
     autoencoder.eval()
     scheduler = define_instance(config_ns, "noise_scheduler")
+    if args.init_diffusion_checkpoint is not None:
+        init_ckpt = torch.load(args.init_diffusion_checkpoint, map_location=device, weights_only=False)
+        unet.load_state_dict(init_ckpt["unet_state_dict"])
+        print(f"initialized diffusion UNet from {args.init_diffusion_checkpoint}", flush=True)
 
     train_latents, train_labels = load_latent_split(args.latents_dir, "train")
     val_latents, val_labels = load_latent_split(args.latents_dir, "val")
+    train_latents, train_labels = filter_latents_by_label(train_latents, train_labels, args.label_filter)
+    val_latents, val_labels = filter_latents_by_label(val_latents, val_labels, args.label_filter)
     scale_factor = (1.0 / train_latents.std()).to(device)
     latent_shape = tuple(train_latents.shape[1:])
+    print(
+        f"loaded latents: train={train_latents.shape[0]}, val={val_latents.shape[0]}, labels={sorted(set(train_labels.tolist()))}",
+        flush=True,
+    )
     train_loader = make_loader(train_latents, train_labels, train_config["batch_size"], shuffle=True)
     val_loader = make_loader(val_latents, val_labels, train_config["batch_size"], shuffle=False)
 
     optimizer = torch.optim.Adam(unet.parameters(), lr=train_config["lr"])
     scaler = GradScaler("cuda", enabled=train_config["amp"])
     writer = SummaryWriter(log_dir=str(args.output_dir / "tfevents"))
-    wandb_run = setup_wandb(args.wandb, args.wandb_project, {"network": network_config, "training": train_config})
+    wandb_run = setup_wandb(args.wandb, args.wandb_project, args.wandb_name, {"network": network_config, "training": train_config})
     loss_fn = torch.nn.L1Loss()
     best_val = float("inf")
     epochs_without_improvement = 0
@@ -235,6 +260,7 @@ def main() -> None:
                 train_config["samples_per_class"],
                 train_config["num_inference_steps"],
                 train_config["cfg_guidance_scale"],
+                train_config.get("sample_class_ids"),
             )
             sample_path = samples_dir / f"epoch_{epoch + 1:04d}_cfg{train_config['cfg_guidance_scale']}.png"
             grid = save_generation_grid(sample_images_tensor, sample_path, train_config["samples_per_class"])
@@ -297,6 +323,7 @@ def main() -> None:
         train_config["final_samples_per_class"],
         train_config["num_inference_steps"],
         train_config["cfg_guidance_scale"],
+        train_config.get("sample_class_ids"),
     )
     final_path = samples_dir / f"final_25_per_class_cfg{train_config['cfg_guidance_scale']}.png"
     save_generation_grid(final_images, final_path, train_config["final_samples_per_class"])
